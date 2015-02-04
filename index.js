@@ -5,44 +5,74 @@ var fs   = require("fs");
 var _    = require("lodash");
 
 module.exports = function (root, options) {
+  if (!options) {
+    options = { sourceMap: true };
+  }
+
   var cache = Object.create(null);
 
   return function (req, res, next) {
-    if (!to5.canCompile(req.url)) return next();
-
     var pathname = path.normalize(url.parse(req.url).pathname);
+
+    var type = (pathname.slice(-4) === '.map') ? 'map' : 'code';
+    if (type === 'map') {
+      if (options.sourceMap !== true) {
+        return next();
+      }
+      pathname = pathname.slice(0, -4);
+    }
+
+    if (!to5.canCompile(pathname)) {
+      return next();
+    }
+
     var src = path.join(root, pathname);
     var srcStat;
 
-    var send = function (data) {
+    var send = function (result) {
       res.set('Content-Type', 'application/javascript');
-      res.end(data);
+      res.end(result[type]);
     };
 
     var compile = function () {
-      var transformOpts = _.extend({}, options);
+      var file = path.basename(pathname);
+
+      var transformOpts = _.clone(options);
+      if (options.sourceMap === true) {
+        transformOpts.filenameRelative = file;
+      }
       to5.transformFile(src, transformOpts, function (err, result) {
         if (err) {
-          next(err);
+          return next(err);
+        }
+
+        var code = result.code;
+        if (options.sourceMap === true) {
+          result = cache[pathname] = {
+            mtime: +srcStat.mtime,
+            code: result.code + '\n\n//# sourceMappingURL=' + file + '.map\n',
+            map: JSON.stringify(result.map)
+          };
         } else {
-          cache[pathname] = {
+          result = cache[pathname] = {
             mtime: +srcStat.mtime,
             code: result.code
           };
-          send(result.code);
         }
+
+        send(result);
       });
     };
 
     fs.stat(src, function (err, stat) {
       srcStat = stat;
-      var cacheObj = cache[pathname];
+      var result = cache[pathname];
       if (err && err.code === 'ENOENT') {
         next();
       } else if (err) {
         next(err);
-      } else if (cacheObj && cacheObj.mtime === +stat.mtime) {
-        send(cacheObj.code);
+      } else if (result && result.mtime === +stat.mtime) {
+        send(result);
       } else {
         compile();
       }
